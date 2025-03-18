@@ -5,7 +5,7 @@ from typing import Dict, List, Any
 
 
 class SambaNovaCoder:
-    """Helper class for interacting with SambaNova's Qwen2.5-Coder API."""
+    """Helper class for interacting with SambaNova's Qwen2.5-Coder API for Jakarta XML-WS test generation."""
     
     def __init__(self, api_key=None, model="Qwen2.5-Coder-32B-Instruct"):
         """Initialize with API key and model name."""
@@ -40,7 +40,32 @@ class SambaNovaCoder:
             "messages": [
                 {
                     "role": "system",
-                    "content": "You are a Java testing expert specializing in creating effective JUnit 5 tests for Dropwizard and Jakarta XML Web Services applications. You follow testing best practices, use Mockito for mocking, and ensure thorough test coverage. IMPORTANT: Always use 'jakarta.*' packages instead of 'javax.*' packages, as this is a Jakarta EE application. For example, use 'jakarta.xml.ws' NOT 'javax.xml.ws'."
+                    "content": """You are a Java testing expert specializing in creating effective JUnit 5 tests for Dropwizard and Jakarta XML Web Services applications.
+
+IMPORTANT JAKARTA XML REQUIREMENTS:
+1. Always use 'jakarta.*' packages instead of 'javax.*' packages, as this is a Jakarta EE application.
+   - Use 'jakarta.xml.ws' NOT 'javax.xml.ws'
+   - Use 'jakarta.servlet' NOT 'javax.servlet'
+   - Use 'jakarta.validation' NOT 'javax.validation'
+   - All other 'javax.*' imports should be 'jakarta.*'
+
+2. The project is built on:
+   - Dropwizard 4.x
+   - JUnit 5 (jupiter)
+   - Mockito 5.x
+   - AssertJ for assertions
+   - Apache CXF for SOAP services implementation
+
+3. Common test patterns:
+   - Use @ExtendWith(MockitoExtension.class) for JUnit 5 tests
+   - Use @Mock for mock dependencies
+   - Use @BeforeEach for setup
+   - Use AssertJ for assertions (assertThat(...).isEqualTo(...))
+   - Use given/when/then comments for test structure
+   - Ensure all dependencies are properly mocked
+   - Ensure validations are tested
+
+The generated tests must compile without errors."""
                 },
                 {
                     "role": "user",
@@ -84,21 +109,19 @@ Generate a comprehensive test that:
 1. Tests the happy path
 2. Tests edge cases and exceptions
 3. Uses Mockito to mock dependencies
-4. Follows best practices for Java testing
+4. Uses AssertJ assertions
 5. Will increase code coverage
 
-IMPORTANT REQUIREMENTS:
-- Use jakarta.* packages instead of javax.* (e.g., jakarta.xml.ws, NOT javax.xml.ws)
-- Import org.mockito.junit.jupiter.MockitoExtension for JUnit 5 extension
-- Use AssertJ for assertions (import static org.assertj.core.api.Assertions.*)
-- All test classes must compile without errors
+Remember to use jakarta.* packages instead of javax.*.
 
-Return ONLY the test method code in a Java code block, nothing else.
+Return ONLY the test method code in a Java code block.
 """
     
     def _create_test_class_prompt(self, class_source: str, class_name: str, methods: List[Dict[str, Any]]) -> str:
         """Create a prompt for generating a complete test class."""
         methods_str = "\n".join([f"- {m['method']} (current coverage: {m['coverage_percentage']:.1f}%)" for m in methods])
+        package_name = '.'.join(class_name.split('.')[:-1])
+        simple_class_name = class_name.split('.')[-1]
         
         return f"""
 I need you to create a complete JUnit 5 test class for testing {class_name}. Here's the source code:
@@ -110,23 +133,26 @@ I need you to create a complete JUnit 5 test class for testing {class_name}. Her
 Focus on testing these methods with low coverage:
 {methods_str}
 
+The test class should be created in the package: {package_name}
+The test class name should be: {simple_class_name}Test
+
 Requirements:
-1. Create a properly structured test class named {class_name.split('.')[-1]}Test
-2. Include proper imports for JUnit 5, Mockito, and AssertJ
-3. Include @BeforeEach method to set up test fixtures and mocks
-4. Create separate test methods for each scenario
-5. Use descriptive method names (should_X_when_Y pattern)
-6. Mock all external dependencies
-7. Test both happy paths and edge cases/exceptions
-8. Ensure thorough test coverage
+1. Include all necessary imports (using jakarta.* packages, not javax.*)
+2. Include @BeforeEach method to set up test fixtures and mocks
+3. Create separate test methods for each scenario
+4. Use descriptive method names (should_X_when_Y pattern)
+5. Mock all external dependencies
+6. Test both happy paths and edge cases/exceptions
+7. Ensure thorough test coverage
 
-IMPORTANT REQUIREMENTS:
-- Use jakarta.* packages instead of javax.* (e.g., jakarta.xml.ws, NOT javax.xml.ws)
-- Import org.mockito.junit.jupiter.MockitoExtension for JUnit 5 extension
-- Use AssertJ for assertions (import static org.assertj.core.api.Assertions.*)
-- All test classes must compile without errors
+The tests must be compatible with:
+- Dropwizard 4.x
+- Jakarta XML Web Services
+- JUnit Jupiter
+- Mockito
+- AssertJ assertions
 
-Return the COMPLETE test class as a single Java code block.
+Return the COMPLETE test class including package declaration and imports.
 """
     
     def _extract_code_from_response(self, response: str) -> str:

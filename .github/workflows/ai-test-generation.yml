@@ -46,102 +46,113 @@ jobs:
           python -m pip install --upgrade pip
           pip install requests
 
-      # Add test dependencies to POM files
-      - name: Add test dependencies to POM
-        run: |
-          # Find the example module's POM file
-          EXAMPLE_POM="dropwizard-jakarta-xml-ws-example/pom.xml"
-          
-          if [ -f "$EXAMPLE_POM" ]; then
-            echo "Adding test dependencies to $EXAMPLE_POM"
-            
-            # Use sed to insert the dependencies before the </dependencies> tag
-            sed -i '/<\/dependencies>/i \
-            <!-- Test dependencies -->\
-            <dependency>\
-                <groupId>org.mockito</groupId>\
-                <artifactId>mockito-junit-jupiter</artifactId>\
-                <version>5.10.0</version>\
-                <scope>test</scope>\
-            </dependency>\
-            <dependency>\
-                <groupId>org.junit.jupiter</groupId>\
-                <artifactId>junit-jupiter-api</artifactId>\
-                <version>5.10.2</version>\
-                <scope>test</scope>\
-            </dependency>\
-            <dependency>\
-                <groupId>org.junit.jupiter</groupId>\
-                <artifactId>junit-jupiter-engine</artifactId>\
-                <version>5.10.2</version>\
-                <scope>test</scope>\
-            </dependency>\
-            <dependency>\
-                <groupId>org.assertj</groupId>\
-                <artifactId>assertj-core</artifactId>\
-                <version>3.25.3</version>\
-                <scope>test</scope>\
-            </dependency>' "$EXAMPLE_POM"
-          fi
+      # Build the project first to ensure all modules are compiled
+      - name: Build project
+        run: mvn clean compile -DskipTests
 
-      # Add JaCoCo plugin to POM temporarily for this run
+      # We'll modify the test dependencies approach to be more compatible
+      - name: Create test dependencies file
+        run: |
+          cat > test-dependencies.xml << 'EOF'
+          <dependencies>
+            <dependency>
+              <groupId>org.junit.jupiter</groupId>
+              <artifactId>junit-jupiter</artifactId>
+              <version>5.10.2</version>
+              <scope>test</scope>
+            </dependency>
+            <dependency>
+              <groupId>org.mockito</groupId>
+              <artifactId>mockito-junit-jupiter</artifactId>
+              <version>5.10.0</version>
+              <scope>test</scope>
+            </dependency>
+            <dependency>
+              <groupId>org.assertj</groupId>
+              <artifactId>assertj-core</artifactId>
+              <version>3.25.3</version>
+              <scope>test</scope>
+            </dependency>
+          </dependencies>
+          EOF
+
+      # Add JaCoCo plugin for coverage analysis
       - name: Add JaCoCo plugin to POM
         run: |
-          # Find all pom.xml files
-          for POM_FILE in $(find . -name "pom.xml"); do
+          mkdir -p .github/temp
+          cat > .github/temp/jacoco-plugin.xml << 'EOF'
+          <plugin>
+            <groupId>org.jacoco</groupId>
+            <artifactId>jacoco-maven-plugin</artifactId>
+            <version>0.8.12</version>
+            <executions>
+              <execution>
+                <id>prepare-agent</id>
+                <goals>
+                  <goal>prepare-agent</goal>
+                </goals>
+              </execution>
+              <execution>
+                <id>report</id>
+                <phase>test</phase>
+                <goals>
+                  <goal>report</goal>
+                </goals>
+              </execution>
+            </executions>
+          </plugin>
+          EOF
+          
+          # Use xmlstarlet to add the plugin properly
+          sudo apt-get update && sudo apt-get install -y xmlstarlet
+          
+          # Process each module's POM
+          for POM_FILE in $(find . -name "pom.xml" | grep -v "/target/"); do
             # Check if JaCoCo plugin is already defined
             if ! grep -q "jacoco-maven-plugin" "$POM_FILE"; then
-              echo "Adding JaCoCo plugin to $POM_FILE"
+              # Make a backup
+              cp "$POM_FILE" "${POM_FILE}.bak"
               
-              # Use sed to insert the plugin configuration before the </plugins> tag
-              sed -i '/<\/plugins>/i \
-              <plugin>\
-                  <groupId>org.jacoco</groupId>\
-                  <artifactId>jacoco-maven-plugin</artifactId>\
-                  <version>0.8.12</version>\
-                  <executions>\
-                      <execution>\
-                          <id>prepare-agent</id>\
-                          <goals>\
-                              <goal>prepare-agent</goal>\
-                          </goals>\
-                      </execution>\
-                      <execution>\
-                          <id>report</id>\
-                          <phase>test</phase>\
-                          <goals>\
-                              <goal>report</goal>\
-                          </goals>\
-                      </execution>\
-                  </executions>\
-              </plugin>' "$POM_FILE"
+              # Add plugin to build/plugins section
+              if xmlstarlet sel -t -c "/project/build/plugins" "$POM_FILE" > /dev/null 2>&1; then
+                xmlstarlet ed --inplace -s "/project/build/plugins" -t elem -n "plugin-placeholder" -v "" \
+                  -i "//plugin-placeholder" -t xml -n "" -v "$(cat .github/temp/jacoco-plugin.xml)" \
+                  -r "//plugin-placeholder" -v "plugin" "$POM_FILE"
+              elif xmlstarlet sel -t -c "/project/build" "$POM_FILE" > /dev/null 2>&1; then
+                xmlstarlet ed --inplace -s "/project/build" -t elem -n "plugins" -v "" \
+                  -s "/project/build/plugins" -t elem -n "plugin-placeholder" -v "" \
+                  -i "//plugin-placeholder" -t xml -n "" -v "$(cat .github/temp/jacoco-plugin.xml)" \
+                  -r "//plugin-placeholder" -v "plugin" "$POM_FILE"
+              else
+                xmlstarlet ed --inplace -s "/project" -t elem -n "build" -v "" \
+                  -s "/project/build" -t elem -n "plugins" -v "" \
+                  -s "/project/build/plugins" -t elem -n "plugin-placeholder" -v "" \
+                  -i "//plugin-placeholder" -t xml -n "" -v "$(cat .github/temp/jacoco-plugin.xml)" \
+                  -r "//plugin-placeholder" -v "plugin" "$POM_FILE"
+              fi
             fi
           done
 
-      
-      # Run tests with JaCoCo from the project root
+      # Run tests with JaCoCo to generate coverage data
       - name: Run tests with JaCoCo coverage
         run: |
           echo "Running tests with JaCoCo agent..."
-          mvn clean jacoco:prepare-agent test jacoco:report
+          mvn test jacoco:report -B -V
 
-      # Run JaCoCo finder to verify reports are available
-      - name: Run JaCoCo Finder
-        run: |
-          cd .github/scripts
-          python jacoco_finder.py --base-dir ../..
-
-      # Generate tests using the fixed script
+      # Generate tests using SambaNova API
       - name: Generate tests
         env:
           SAMBANOVA_API_KEY: ${{ secrets.SAMBANOVA_API_KEY }}
         run: |
-          cd .github/scripts
-          python test_generator.py --max-classes ${{ github.event.inputs.max_classes || 5 }} --min-coverage ${{ github.event.inputs.min_coverage || 80 }} ${{ github.event.inputs.debug == 'true' && '--debug' || '' }} --base-dir ../..
+          python .github/scripts/test_generator.py \
+            --max-classes ${{ github.event.inputs.max_classes || 5 }} \
+            --min-coverage ${{ github.event.inputs.min_coverage || 80 }} \
+            ${{ github.event.inputs.debug == 'true' && '--debug' || '' }} \
+            --base-dir .
 
-      # Run tests with the new test classes
-      - name: Run tests with new test classes
-        run: mvn test
+      # Build with the new test classes
+      - name: Build with new test classes
+        run: mvn test -B -V
 
       # Create a PR with the generated tests
       - name: Create Pull Request
