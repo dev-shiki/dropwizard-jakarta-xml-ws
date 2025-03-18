@@ -40,7 +40,7 @@ class SambaNovaCoder:
             "messages": [
                 {
                     "role": "system",
-                    "content": "You are a Java testing expert specializing in creating effective JUnit 5 tests for Dropwizard and Jakarta XML Web Services applications. Follow testing best practices, use Mockito for mocking, and ensure thorough test coverage."
+                    "content": "You are a Java testing expert specializing in creating effective JUnit 5 tests for Dropwizard and Jakarta XML Web Services applications. You follow testing best practices, use Mockito for mocking, and ensure thorough test coverage. IMPORTANT: Always use 'jakarta.*' packages instead of 'javax.*' packages, as this is a Jakarta EE application. For example, use 'jakarta.xml.ws' NOT 'javax.xml.ws'."
                 },
                 {
                     "role": "user",
@@ -87,6 +87,12 @@ Generate a comprehensive test that:
 4. Follows best practices for Java testing
 5. Will increase code coverage
 
+IMPORTANT REQUIREMENTS:
+- Use jakarta.* packages instead of javax.* (e.g., jakarta.xml.ws, NOT javax.xml.ws)
+- Import org.mockito.junit.jupiter.MockitoExtension for JUnit 5 extension
+- Use AssertJ for assertions (import static org.assertj.core.api.Assertions.*)
+- All test classes must compile without errors
+
 Return ONLY the test method code in a Java code block, nothing else.
 """
     
@@ -113,6 +119,12 @@ Requirements:
 6. Mock all external dependencies
 7. Test both happy paths and edge cases/exceptions
 8. Ensure thorough test coverage
+
+IMPORTANT REQUIREMENTS:
+- Use jakarta.* packages instead of javax.* (e.g., jakarta.xml.ws, NOT javax.xml.ws)
+- Import org.mockito.junit.jupiter.MockitoExtension for JUnit 5 extension
+- Use AssertJ for assertions (import static org.assertj.core.api.Assertions.*)
+- All test classes must compile without errors
 
 Return the COMPLETE test class as a single Java code block.
 """
