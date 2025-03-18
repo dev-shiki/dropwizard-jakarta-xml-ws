@@ -1,0 +1,71 @@
+name: AI-Powered Test Generation
+
+on:
+  workflow_dispatch:
+    inputs:
+      max_classes:
+        description: 'Maximum number of classes to generate tests for'
+        required: true
+        default: '5'
+  schedule:
+    # Run weekly on Monday at 1 AM
+    - cron: '0 1 * * 1'
+
+jobs:
+  generate-tests:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0  # Fetch all history for test analysis
+
+      - name: Set up JDK
+        uses: actions/setup-java@v4
+        with:
+          java-version: '17'
+          distribution: 'zulu'
+          cache: maven
+
+      - name: Set up Python
+        uses: actions/setup-python@v4
+        with:
+          python-version: '3.10'
+          cache: 'pip'
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install langchain requests pydantic
+
+      - name: Run tests and generate coverage report
+        run: mvn clean verify jacoco:report
+
+      - name: Generate tests with AI
+        env:
+          SAMBANOVA_API_KEY: ${{ secrets.SAMBANOVA_API_KEY }}
+        run: python .github/scripts/test_generator.py --max-classes ${{ github.event.inputs.max_classes || 5 }}
+
+      - name: Run tests with new test classes
+        run: mvn test
+
+      - name: Create Pull Request
+        uses: peter-evans/create-pull-request@v5
+        with:
+          token: ${{ secrets.GITHUB_TOKEN }}
+          commit-message: "test: Add AI-generated tests to improve coverage"
+          title: "test: Add AI-generated tests to improve coverage"
+          body: |
+            This PR adds automatically generated tests to improve code coverage.
+            
+            ### Generated Tests
+            
+            The tests were generated using Qwen2.5-Coder model to target classes with low test coverage.
+            
+            ### Please review
+            
+            - [ ] The tests are well-structured and follow project conventions
+            - [ ] The tests properly test the targeted functionality
+            - [ ] The tests don't have any false assumptions about the code
+          branch: ai-generated-tests
+          base: main
