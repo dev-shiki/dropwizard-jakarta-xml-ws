@@ -1,4 +1,4 @@
-name: AI-Powered Test Generation
+name: AI-Powered Test Generation with SonarQube
 
 on:
   workflow_dispatch:
@@ -31,20 +31,478 @@ jobs:
         uses: actions/setup-python@v4
         with:
           python-version: '3.10'
+          # Only use cache if requirements.txt exists
           cache: 'pip'
+          cache-dependency-path: 'requirements.txt'
+
+      - name: Create directories for scripts
+        run: |
+          mkdir -p .github/scripts
+
+      - name: Create SambaNova API Helper
+        run: |
+          cat > .github/scripts/sambanova_api_helper.py << 'EOF'
+          import os
+          import json
+          import requests
+          from typing import Dict, List, Any
+          
+          
+          class SambaNovaCoder:
+              """Helper class for interacting with SambaNova's Qwen2.5-Coder API."""
+              
+              def __init__(self, api_key=None, model="Qwen2.5-Coder-32B-Instruct"):
+                  """Initialize with API key and model name."""
+                  self.api_key = api_key or os.environ.get("SAMBANOVA_API_KEY")
+                  if not self.api_key:
+                      raise ValueError("SAMBANOVA_API_KEY environment variable not set")
+                  
+                  self.base_url = "https://api.sambanova.ai/v1"
+                  self.model = model
+                  self.headers = {
+                      "Authorization": f"Bearer {self.api_key}",
+                      "Content-Type": "application/json"
+                  }
+              
+              def generate_test(self, class_source: str, class_name: str, method_name: str) -> str:
+                  """Generate a test for a specific method in a class."""
+                  prompt = self._create_test_generation_prompt(class_source, class_name, method_name)
+                  response = self._call_api(prompt)
+                  return self._extract_code_from_response(response)
+              
+              def generate_complete_test_class(self, class_source: str, class_name: str, methods: List[Dict[str, Any]]) -> str:
+                  """Generate a complete test class for a Java class."""
+                  prompt = self._create_test_class_prompt(class_source, class_name, methods)
+                  response = self._call_api(prompt)
+                  return self._extract_code_from_response(response)
+              
+              def _call_api(self, prompt: str) -> str:
+                  """Make a call to the SambaNova API."""
+                  data = {
+                      "stream": False,
+                      "model": self.model,
+                      "messages": [
+                          {
+                              "role": "system",
+                              "content": "You are a Java testing expert specializing in creating effective JUnit 5 tests for Dropwizard and Jakarta XML Web Services applications. Follow testing best practices, use Mockito for mocking, and ensure thorough test coverage."
+                          },
+                          {
+                              "role": "user",
+                              "content": prompt
+                          }
+                      ],
+                      "temperature": 0.1,
+                      "top_p": 0.1
+                  }
+                  
+                  try:
+                      response = requests.post(
+                          f"{self.base_url}/chat/completions", 
+                          headers=self.headers,
+                          json=data
+                      )
+                      response.raise_for_status()
+                      result = response.json()
+                      if "choices" in result and result["choices"]:
+                          return result["choices"][0]["message"]["content"]
+                      else:
+                          raise ValueError(f"Unexpected response format: {result}")
+                  except requests.RequestException as e:
+                      print(f"API request failed: {e}")
+                      if hasattr(e, 'response') and e.response:
+                          print(f"Response: {e.response.text}")
+                      raise
+              
+              def _create_test_generation_prompt(self, class_source: str, class_name: str, method_name: str) -> str:
+                  """Create a prompt for generating a test for a specific method."""
+                  return f"""
+          I need you to create a JUnit 5 test for the following method in {class_name}:
+          
+          ```java
+          {class_source}
+          ```
+          
+          Focus on testing the method: {method_name}
+          
+          Generate a comprehensive test that:
+          1. Tests the happy path
+          2. Tests edge cases and exceptions
+          3. Uses Mockito to mock dependencies
+          4. Follows best practices for Java testing
+          5. Will increase code coverage
+          
+          Return ONLY the test method code in a Java code block, nothing else.
+          """
+              
+              def _create_test_class_prompt(self, class_source: str, class_name: str, methods: List[Dict[str, Any]]) -> str:
+                  """Create a prompt for generating a complete test class."""
+                  methods_str = "\n".join([f"- {m['method']} (coverage gap)" for m in methods])
+                  
+                  return f"""
+          I need you to create a complete JUnit 5 test class for testing {class_name}. Here's the source code:
+          
+          ```java
+          {class_source}
+          ```
+          
+          Focus on testing these methods with low coverage:
+          {methods_str}
+          
+          Requirements:
+          1. Create a properly structured test class named {class_name.split('.')[-1]}Test
+          2. Include proper imports for JUnit 5, Mockito, and AssertJ
+          3. Include @BeforeEach method to set up test fixtures and mocks
+          4. Create separate test methods for each scenario
+          5. Use descriptive method names (should_X_when_Y pattern)
+          6. Mock all external dependencies
+          7. Test both happy paths and edge cases/exceptions
+          8. Ensure thorough test coverage
+          
+          Return the COMPLETE test class as a single Java code block.
+          """
+              
+              def _extract_code_from_response(self, response: str) -> str:
+                  """Extract code blocks from the API response."""
+                  import re
+                  
+                  # Try to find Java code blocks
+                  java_blocks = re.findall(r'```java\n([\s\S]*?)\n```', response)
+                  if java_blocks:
+                      return "\n".join(java_blocks)
+                  
+                  # If no code blocks with "java" tag, try without language specification
+                  code_blocks = re.findall(r'```\n([\s\S]*?)\n```', response)
+                  if code_blocks:
+                      return "\n".join(code_blocks)
+                  
+                  # If still no code blocks, return the whole response
+                  return response
+          EOF
+
+      - name: Create SonarQube Test Generator Script
+        run: |
+          cat > .github/scripts/sonarqube_test_generator.py << 'EOF'
+          #!/usr/bin/env python3
+          """
+          Test Generator using SonarQube API
+          """
+          
+          import os
+          import sys
+          import argparse
+          import requests
+          from typing import List, Dict, Any
+          import subprocess
+          
+          # Import the SambaNova helper directly since we're in the same directory
+          from sambanova_api_helper import SambaNovaCoder
+          
+          def parse_args():
+              """Parse command line arguments."""
+              parser = argparse.ArgumentParser(description='Generate tests using SonarQube coverage data')
+              parser.add_argument('--max-classes', type=int, default=5,
+                                  help='Maximum number of classes to generate tests for')
+              parser.add_argument('--src-dir', type=str, default='src/main/java',
+                                  help='Source directory for Java classes')
+              parser.add_argument('--test-dir', type=str, default='src/test/java',
+                                  help='Directory to write generated tests to')
+              parser.add_argument('--project-key', type=str, default='dev-shiki_dropwizard-jakarta-xml-ws',
+                                  help='SonarQube project key')
+              return parser.parse_args()
+          
+          class SonarQubeClient:
+              """Client for SonarQube API."""
+              
+              def __init__(self, token=None, url="https://sonarcloud.io", project_key=None):
+                  """Initialize with API token and URL."""
+                  self.token = token or os.environ.get("SONAR_TOKEN")
+                  if not self.token:
+                      raise ValueError("SONAR_TOKEN environment variable not set")
+                  
+                  self.url = url
+                  self.project_key = project_key
+                  self.auth = (self.token, '')
+              
+              def get_coverage_data(self) -> List[Dict[str, Any]]:
+                  """Get coverage data from SonarQube."""
+                  # Get components with poor coverage
+                  components_url = f"{self.url}/api/measures/component_tree"
+                  params = {
+                      "component": self.project_key,
+                      "metricKeys": "coverage,uncovered_lines",
+                      "strategy": "leaves",
+                      "qualifiers": "FIL"  # Only files
+                  }
+                  
+                  try:
+                      response = requests.get(components_url, auth=self.auth, params=params)
+                      response.raise_for_status()
+                      components_data = response.json()
+                      
+                      # Filter components with coverage < 80%
+                      low_coverage_components = []
+                      for component in components_data.get("components", []):
+                          # Skip test files
+                          if "Test" in component.get("name", ""):
+                              continue
+                          
+                          measures = {m["metric"]: m["value"] for m in component.get("measures", [])}
+                          coverage = float(measures.get("coverage", "100"))
+                          uncovered_lines = int(measures.get("uncovered_lines", "0"))
+                          
+                          if coverage < 80 and uncovered_lines > 0:
+                              # Get component name and path
+                              name = component.get("name", "").replace(".java", "")
+                              path = component.get("path", "")
+                              
+                              # Extract methods with poor coverage
+                              methods = self._get_methods_with_poor_coverage(component.get("key"))
+                              
+                              if methods:
+                                  low_coverage_components.append({
+                                      "class": self._path_to_class_name(path),
+                                      "path": path,
+                                      "coverage": coverage,
+                                      "uncovered_lines": uncovered_lines,
+                                      "methods": methods,
+                                      "priority": uncovered_lines  # Higher priority for more uncovered lines
+                                  })
+                      
+                      # Sort by priority (higher first)
+                      low_coverage_components.sort(key=lambda x: x["priority"], reverse=True)
+                      return low_coverage_components
+                      
+                  except requests.RequestException as e:
+                      print(f"Error calling SonarQube API: {e}")
+                      if hasattr(e, 'response') and e.response:
+                          print(f"Response: {e.response.text}")
+                      return []
+              
+              def _get_methods_with_poor_coverage(self, component_key: str) -> List[Dict[str, Any]]:
+                  """Get methods with poor coverage for a specific component."""
+                  try:
+                      # Get source code
+                      source_url = f"{self.url}/api/sources/show"
+                      params = {
+                          "key": component_key
+                      }
+                      response = requests.get(source_url, auth=self.auth, params=params)
+                      response.raise_for_status()
+                      
+                      # Get line coverage
+                      coverage_url = f"{self.url}/api/coverage/list"
+                      params = {
+                          "component": component_key
+                      }
+                      coverage_response = requests.get(coverage_url, auth=self.auth, params=params)
+                      coverage_response.raise_for_status()
+                      
+                      # Process source to extract methods
+                      methods = self._extract_methods_from_source(
+                          response.json(), 
+                          coverage_response.json()
+                      )
+                      
+                      return methods
+                      
+                  except requests.RequestException as e:
+                      print(f"Error getting method coverage: {e}")
+                      return []
+              
+              def _extract_methods_from_source(self, source_data, coverage_data):
+                  """Extract methods from source code and identify uncovered ones."""
+                  methods = []
+                  method_lines = {}
+                  current_method = None
+                  
+                  # Extract uncovered lines
+                  uncovered_lines = set()
+                  for file_data in coverage_data.get("files", []):
+                      for line in file_data.get("lines", []):
+                          if not line.get("covered", True):
+                              uncovered_lines.add(line.get("line"))
+                  
+                  # Parse source to find methods
+                  for line in source_data.get("sources", []):
+                      line_num = line.get("line")
+                      code = line.get("code", "")
+                      
+                      # Very simple method detection
+                      if "public" in code and "(" in code and ")" in code and "{" in code:
+                          # Extract method name
+                          parts = code.split("(")[0].split()
+                          for i, part in enumerate(parts):
+                              if i > 0 and part not in ["public", "private", "protected", 
+                                                      "static", "final", "synchronized", 
+                                                      "void", "int", "String", "boolean"]:
+                                  current_method = part
+                                  method_lines[current_method] = [line_num]
+                                  break
+                      
+                      # Add line to current method
+                      if current_method and line_num:
+                          method_lines[current_method].append(line_num)
+                  
+                  # Find methods with uncovered lines
+                  for method, lines in method_lines.items():
+                      uncovered = [line for line in lines if line in uncovered_lines]
+                      if uncovered:
+                          methods.append({
+                              "method": method,
+                              "uncovered_lines": len(uncovered)
+                          })
+                  
+                  return methods
+              
+              def _path_to_class_name(self, path: str) -> str:
+                  """Convert a file path to a Java class name."""
+                  # Remove src/main/java/ prefix and .java suffix
+                  if path.startswith("src/main/java/"):
+                      path = path[len("src/main/java/"):]
+                  
+                  if path.endswith(".java"):
+                      path = path[:-5]
+                  
+                  # Convert slashes to dots
+                  return path.replace("/", ".")
+          
+          def get_class_source(class_name: str, src_dir: str) -> str:
+              """Get source code for a class."""
+              try:
+                  # Split class name into package and simple name
+                  parts = class_name.split('.')
+                  simple_name = parts[-1]
+                  package_path = '/'.join(parts[:-1])
+                  
+                  # Try direct path first
+                  class_path = os.path.join(src_dir, package_path, f"{simple_name}.java")
+                  if os.path.exists(class_path):
+                      with open(class_path, 'r') as f:
+                          return f.read()
+                  
+                  # Try to find by just the simple name as fallback
+                  result = subprocess.run(['find', src_dir, '-name', f"{simple_name}.java"], 
+                                         capture_output=True, text=True)
+                  if result.stdout:
+                      filepath = result.stdout.strip().split('\n')[0]
+                      with open(filepath, 'r') as f:
+                          return f.read()
+                  
+                  print(f"Could not find source file for {class_name}")
+                  return None
+              except Exception as e:
+                  print(f"Error reading source for {class_name}: {e}")
+                  return None
+          
+          def check_test_exists(class_name: str, test_dir: str) -> bool:
+              """Check if a test class already exists."""
+              parts = class_name.split('.')
+              simple_name = parts[-1]
+              package_path = '/'.join(parts[:-1])
+              
+              test_class_path = os.path.join(test_dir, package_path, f"{simple_name}Test.java")
+              return os.path.exists(test_class_path)
+          
+          def write_test_class(package_name: str, class_name: str, test_code: str, test_dir: str) -> str:
+              """Write the test class to a file."""
+              package_path = os.path.join(test_dir, package_name.replace('.', '/'))
+              os.makedirs(package_path, exist_ok=True)
+              
+              simple_name = class_name.split('.')[-1]
+              file_path = os.path.join(package_path, f"{simple_name}Test.java")
+              
+              with open(file_path, 'w') as f:
+                  f.write(test_code)
+              
+              print(f"Wrote test class to {file_path}")
+              return file_path
+          
+          def main():
+              """Main function to generate tests."""
+              args = parse_args()
+              
+              # Initialize SonarQube client
+              sonar_client = SonarQubeClient(project_key=args.project_key)
+              
+              # Get coverage data
+              coverage_data = sonar_client.get_coverage_data()
+              
+              if not coverage_data:
+                  print("No coverage gaps found in SonarQube!")
+                  return
+              
+              print(f"Found {len(coverage_data)} classes with low coverage")
+              
+              # Initialize the SambaNova API helper
+              sambanova = SambaNovaCoder()
+              
+              # Process classes with the most coverage gaps, up to max_classes
+              processed_count = 0
+              for class_data in coverage_data[:args.max_classes]:
+                  class_name = class_data["class"]
+                  
+                  # Skip classes that already have tests
+                  simple_class_name = class_name.split('.')[-1]
+                  package_name = '.'.join(class_name.split('.')[:-1])
+                  if check_test_exists(class_name, args.test_dir):
+                      print(f"Skipping {class_name} as it already has tests")
+                      continue
+                  
+                  print(f"\nProcessing {class_name} with {len(class_data['methods'])} methods")
+                  
+                  # Get class source
+                  class_source = get_class_source(class_name, args.src_dir)
+                  if not class_source:
+                      print(f"Could not get source for {class_name}, skipping")
+                      continue
+                  
+                  # Generate tests
+                  print(f"Generating tests for {class_name}...")
+                  try:
+                      test_code = sambanova.generate_complete_test_class(
+                          class_source, class_name, class_data["methods"]
+                      )
+                      
+                      if not test_code:
+                          print(f"No tests generated for {class_name}")
+                          continue
+                          
+                      # Add package declaration if missing
+                      if not test_code.strip().startswith("package "):
+                          test_code = f"package {package_name};\n\n{test_code}"
+                      
+                      # Write test class
+                      write_test_class(package_name, simple_class_name, test_code, args.test_dir)
+                      processed_count += 1
+                      
+                  except Exception as e:
+                      print(f"Error generating tests for {class_name}: {e}")
+                      continue
+              
+              print(f"\nGenerated tests for {processed_count} classes")
+          
+          if __name__ == "__main__":
+              main()
+          EOF
 
       - name: Install dependencies
         run: |
           python -m pip install --upgrade pip
-          pip install langchain requests pydantic
+          pip install requests
 
-      - name: Run tests and generate coverage report
-        run: mvn clean verify jacoco:report
+      - name: Run SonarQube analysis
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          SONAR_TOKEN: ${{ secrets.SONAR_TOKEN }}
+        run: mvn -B -V -Dsonar.coverage.jacoco.xmlReportPaths=target/site/jacoco/jacoco.xml org.jacoco:jacoco-maven-plugin:prepare-agent verify org.jacoco:jacoco-maven-plugin:report org.sonarsource.scanner.maven:sonar-maven-plugin:sonar
 
-      - name: Generate tests with AI
+      - name: Generate tests with SonarQube data
         env:
           SAMBANOVA_API_KEY: ${{ secrets.SAMBANOVA_API_KEY }}
-        run: python .github/scripts/test_generator.py --max-classes ${{ github.event.inputs.max_classes || 5 }}
+          SONAR_TOKEN: ${{ secrets.SONAR_TOKEN }}
+        run: |
+          cd .github/scripts
+          python sonarqube_test_generator.py --max-classes ${{ github.event.inputs.max_classes || 5 }}
 
       - name: Run tests with new test classes
         run: mvn test
@@ -56,11 +514,11 @@ jobs:
           commit-message: "test: Add AI-generated tests to improve coverage"
           title: "test: Add AI-generated tests to improve coverage"
           body: |
-            This PR adds automatically generated tests to improve code coverage.
+            This PR adds automatically generated tests to improve code coverage based on SonarQube analysis.
             
             ### Generated Tests
             
-            The tests were generated using Qwen2.5-Coder model to target classes with low test coverage.
+            The tests were generated using Qwen2.5-Coder model with SonarQube data to target classes with low test coverage.
             
             ### Please review
             
