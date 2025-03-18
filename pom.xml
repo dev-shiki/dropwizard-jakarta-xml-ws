@@ -47,9 +47,9 @@
         <kiwi-bom.version>2.0.22</kiwi-bom.version>
 
         <!-- Sonar properties -->
-        <sonar.projectKey>kiwiproject_dropwizard-jakarta-xml-ws</sonar.projectKey>
+        <sonar.projectKey>dev-shiki_dropwizard-jakarta-xml-ws</sonar.projectKey>
         <sonar.moduleKey>${project.groupId}:${project.artifactId}</sonar.moduleKey>
-        <sonar.organization>kiwiproject</sonar.organization>
+        <sonar.organization>dev-shiki</sonar.organization>
         <sonar.host.url>https://sonarcloud.io</sonar.host.url>
     </properties>
 
