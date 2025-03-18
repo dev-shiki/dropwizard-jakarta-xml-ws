@@ -768,7 +768,7 @@ jobs:
           chmod +x .github/scripts/test_generator.py
 
       - name: Run tests and generate coverage report
-        run: mvn clean verify jacoco:report
+        run: mvn clean jacoco:prepare-agent test jacoco:report
 
       - name: Run JaCoCo Finder to debug
         run: |
