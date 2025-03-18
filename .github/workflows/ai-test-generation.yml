@@ -1,4 +1,4 @@
-name: AI-Powered Test Generation with SonarQube
+name: AI-Powered Test Generation with JaCoCo
 
 on:
   workflow_dispatch:
@@ -7,6 +7,10 @@ on:
         description: 'Maximum number of classes to generate tests for'
         required: true
         default: '5'
+      min_coverage:
+        description: 'Minimum coverage percentage threshold'
+        required: true
+        default: '80'
   schedule:
     # Run weekly on Monday at 1 AM
     - cron: '0 1 * * 1'
@@ -31,9 +35,15 @@ jobs:
         uses: actions/setup-python@v4
         with:
           python-version: '3.10'
-          # Only use cache if requirements.txt exists
-          cache: 'pip'
-          cache-dependency-path: 'requirements.txt'
+
+      - name: Create requirements.txt
+        run: |
+          echo "requests>=2.31.0" > requirements.txt
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
 
       - name: Create directories for scripts
         run: |
@@ -136,7 +146,7 @@ jobs:
               
               def _create_test_class_prompt(self, class_source: str, class_name: str, methods: List[Dict[str, Any]]) -> str:
                   """Create a prompt for generating a complete test class."""
-                  methods_str = "\n".join([f"- {m['method']} (coverage gap)" for m in methods])
+                  methods_str = "\n".join([f"- {m['method']} (current coverage: {m['coverage_percentage']:.1f}%)" for m in methods])
                   
                   return f"""
           I need you to create a complete JUnit 5 test class for testing {class_name}. Here's the source code:
@@ -179,219 +189,183 @@ jobs:
                   return response
           EOF
 
-      - name: Create SonarQube Test Generator Script
+      - name: Create JaCoCo Test Generator Script
         run: |
-          cat > .github/scripts/sonarqube_test_generator.py << 'EOF'
+          cat > .github/scripts/jacoco_test_generator.py << 'EOF'
           #!/usr/bin/env python3
           """
-          Test Generator using SonarQube API
+          Improved Test Generator using JaCoCo XML Report
+          
+          This script parses the JaCoCo XML report directly to find coverage gaps
+          and uses SambaNova to generate tests for the uncovered code.
           """
           
           import os
           import sys
           import argparse
-          import requests
+          import xml.etree.ElementTree as ET
+          import re
+          import json
           from typing import List, Dict, Any
           import subprocess
+          from pathlib import Path
           
-          # Import the SambaNova helper directly since we're in the same directory
+          # Import the SambaNova helper
           from sambanova_api_helper import SambaNovaCoder
           
           def parse_args():
               """Parse command line arguments."""
-              parser = argparse.ArgumentParser(description='Generate tests using SonarQube coverage data')
+              parser = argparse.ArgumentParser(description='Generate tests to improve code coverage')
               parser.add_argument('--max-classes', type=int, default=5,
                                   help='Maximum number of classes to generate tests for')
+              parser.add_argument('--jacoco-report', type=str, default='target/site/jacoco/jacoco.xml',
+                                  help='Path to the JaCoCo XML report')
               parser.add_argument('--src-dir', type=str, default='src/main/java',
                                   help='Source directory for Java classes')
               parser.add_argument('--test-dir', type=str, default='src/test/java',
                                   help='Directory to write generated tests to')
-              parser.add_argument('--project-key', type=str, default='dev-shiki_dropwizard-jakarta-xml-ws',
-                                  help='SonarQube project key')
+              parser.add_argument('--min-coverage', type=float, default=80.0,
+                                  help='Minimum coverage percentage threshold (default: 80.0)')
               return parser.parse_args()
           
-          class SonarQubeClient:
-              """Client for SonarQube API."""
+          def find_coverage_gaps(jacoco_path: str, min_coverage: float = 80.0) -> List[Dict[str, Any]]:
+              """Find methods with low coverage from JaCoCo report."""
+              print(f"Analyzing coverage report at {jacoco_path}")
               
-              def __init__(self, token=None, url="https://sonarcloud.io", project_key=None):
-                  """Initialize with API token and URL."""
-                  self.token = token or os.environ.get("SONAR_TOKEN")
-                  if not self.token:
-                      raise ValueError("SONAR_TOKEN environment variable not set")
+              try:
+                  if not os.path.exists(jacoco_path):
+                      print(f"JaCoCo report not found at {jacoco_path}")
+                      # Try to find it
+                      report_files = list(Path('.').glob('**/jacoco.xml'))
+                      if report_files:
+                          jacoco_path = str(report_files[0])
+                          print(f"Found JaCoCo report at: {jacoco_path}")
+                      else:
+                          return []
                   
-                  self.url = url
-                  self.project_key = project_key
-                  self.auth = (self.token, '')
-              
-              def get_coverage_data(self) -> List[Dict[str, Any]]:
-                  """Get coverage data from SonarQube."""
-                  # Get components with poor coverage
-                  components_url = f"{self.url}/api/measures/component_tree"
-                  params = {
-                      "component": self.project_key,
-                      "metricKeys": "coverage,uncovered_lines",
-                      "strategy": "leaves",
-                      "qualifiers": "FIL"  # Only files
-                  }
+                  tree = ET.parse(jacoco_path)
+                  root = tree.getroot()
+                  coverage_gaps = []
                   
-                  try:
-                      response = requests.get(components_url, auth=self.auth, params=params)
-                      response.raise_for_status()
-                      components_data = response.json()
+                  for package in root.findall(".//package"):
+                      package_name = package.attrib.get('name', '').replace('/', '.')
                       
-                      # Filter components with coverage < 80%
-                      low_coverage_components = []
-                      for component in components_data.get("components", []):
-                          # Skip test files
-                          if "Test" in component.get("name", ""):
+                      for clazz in package.findall("class"):
+                          class_name = clazz.attrib.get('name', '').replace('/', '.')
+                          
+                          # Skip test classes
+                          if 'Test' in class_name:
                               continue
                           
-                          measures = {m["metric"]: m["value"] for m in component.get("measures", [])}
-                          coverage = float(measures.get("coverage", "100"))
-                          uncovered_lines = int(measures.get("uncovered_lines", "0"))
+                          # Check if class has a source file
+                          source_file_name = clazz.attrib.get('sourcefilename')
+                          if not source_file_name:
+                              continue
                           
-                          if coverage < 80 and uncovered_lines > 0:
-                              # Get component name and path
-                              name = component.get("name", "").replace(".java", "")
-                              path = component.get("path", "")
+                          class_methods = []
+                          total_class_methods = 0
+                          covered_class_methods = 0
+                          
+                          for method in clazz.findall(".//method"):
+                              method_name = method.attrib.get('name', '')
                               
-                              # Extract methods with poor coverage
-                              methods = self._get_methods_with_poor_coverage(component.get("key"))
+                              # Skip constructors for now
+                              if method_name == "<init>":
+                                  continue
                               
-                              if methods:
-                                  low_coverage_components.append({
-                                      "class": self._path_to_class_name(path),
-                                      "path": path,
-                                      "coverage": coverage,
-                                      "uncovered_lines": uncovered_lines,
-                                      "methods": methods,
-                                      "priority": uncovered_lines  # Higher priority for more uncovered lines
-                                  })
-                      
-                      # Sort by priority (higher first)
-                      low_coverage_components.sort(key=lambda x: x["priority"], reverse=True)
-                      return low_coverage_components
-                      
-                  except requests.RequestException as e:
-                      print(f"Error calling SonarQube API: {e}")
-                      if hasattr(e, 'response') and e.response:
-                          print(f"Response: {e.response.text}")
-                      return []
-              
-              def _get_methods_with_poor_coverage(self, component_key: str) -> List[Dict[str, Any]]:
-                  """Get methods with poor coverage for a specific component."""
-                  try:
-                      # Get source code
-                      source_url = f"{self.url}/api/sources/show"
-                      params = {
-                          "key": component_key
-                      }
-                      response = requests.get(source_url, auth=self.auth, params=params)
-                      response.raise_for_status()
-                      
-                      # Get line coverage
-                      coverage_url = f"{self.url}/api/coverage/list"
-                      params = {
-                          "component": component_key
-                      }
-                      coverage_response = requests.get(coverage_url, auth=self.auth, params=params)
-                      coverage_response.raise_for_status()
-                      
-                      # Process source to extract methods
-                      methods = self._extract_methods_from_source(
-                          response.json(), 
-                          coverage_response.json()
-                      )
-                      
-                      return methods
-                      
-                  except requests.RequestException as e:
-                      print(f"Error getting method coverage: {e}")
-                      return []
-              
-              def _extract_methods_from_source(self, source_data, coverage_data):
-                  """Extract methods from source code and identify uncovered ones."""
-                  methods = []
-                  method_lines = {}
-                  current_method = None
+                              total_class_methods += 1
+                              
+                              # Find instruction coverage
+                              counter = method.find("counter[@type='INSTRUCTION']")
+                              if counter is not None:
+                                  missed = int(counter.attrib.get('missed', 0))
+                                  covered = int(counter.attrib.get('covered', 0))
+                                  total = missed + covered
+                                  coverage = 0 if total == 0 else (covered / total) * 100
+                                  
+                                  # Method is considered covered if it has at least one instruction covered
+                                  if covered > 0:
+                                      covered_class_methods += 1
+                                  
+                                  # Add methods with less than min_coverage
+                                  if coverage < min_coverage:
+                                      class_methods.append({
+                                          'method': method_name,
+                                          'coverage_percentage': coverage,
+                                          'missed_instructions': missed,
+                                          'priority': missed  # Higher priority for more missed instructions
+                                      })
+                          
+                          # Only include classes with methods that need testing
+                          if class_methods:
+                              # Calculate overall class coverage percentage
+                              class_coverage = 0 if total_class_methods == 0 else (covered_class_methods / total_class_methods) * 100
+                              
+                              coverage_gaps.append({
+                                  'package': package_name,
+                                  'class': class_name,
+                                  'source_file': source_file_name,
+                                  'methods': class_methods,
+                                  'class_coverage': class_coverage,
+                                  'priority': sum(m['missed_instructions'] for m in class_methods)  # Sum of all missed instructions
+                              })
                   
-                  # Extract uncovered lines
-                  uncovered_lines = set()
-                  for file_data in coverage_data.get("files", []):
-                      for line in file_data.get("lines", []):
-                          if not line.get("covered", True):
-                              uncovered_lines.add(line.get("line"))
+                  # Sort by priority (descending)
+                  coverage_gaps.sort(key=lambda x: x['priority'], reverse=True)
+                  return coverage_gaps
                   
-                  # Parse source to find methods
-                  for line in source_data.get("sources", []):
-                      line_num = line.get("line")
-                      code = line.get("code", "")
-                      
-                      # Very simple method detection
-                      if "public" in code and "(" in code and ")" in code and "{" in code:
-                          # Extract method name
-                          parts = code.split("(")[0].split()
-                          for i, part in enumerate(parts):
-                              if i > 0 and part not in ["public", "private", "protected", 
-                                                      "static", "final", "synchronized", 
-                                                      "void", "int", "String", "boolean"]:
-                                  current_method = part
-                                  method_lines[current_method] = [line_num]
-                                  break
-                      
-                      # Add line to current method
-                      if current_method and line_num:
-                          method_lines[current_method].append(line_num)
-                  
-                  # Find methods with uncovered lines
-                  for method, lines in method_lines.items():
-                      uncovered = [line for line in lines if line in uncovered_lines]
-                      if uncovered:
-                          methods.append({
-                              "method": method,
-                              "uncovered_lines": len(uncovered)
-                          })
-                  
-                  return methods
-              
-              def _path_to_class_name(self, path: str) -> str:
-                  """Convert a file path to a Java class name."""
-                  # Remove src/main/java/ prefix and .java suffix
-                  if path.startswith("src/main/java/"):
-                      path = path[len("src/main/java/"):]
-                  
-                  if path.endswith(".java"):
-                      path = path[:-5]
-                  
-                  # Convert slashes to dots
-                  return path.replace("/", ".")
+              except Exception as e:
+                  print(f"Error parsing JaCoCo report: {e}")
+                  import traceback
+                  traceback.print_exc()
+                  return []
           
-          def get_class_source(class_name: str, src_dir: str) -> str:
-              """Get source code for a class."""
-              try:
-                  # Split class name into package and simple name
-                  parts = class_name.split('.')
-                  simple_name = parts[-1]
-                  package_path = '/'.join(parts[:-1])
-                  
-                  # Try direct path first
+          def find_source_file(class_name: str, src_dirs: List[str]) -> str:
+              """Find the source file for a class."""
+              # Extract package and class name
+              parts = class_name.split('.')
+              simple_name = parts[-1]
+              package_path = '/'.join(parts[:-1])
+              
+              # Try direct path first in each source directory
+              for src_dir in src_dirs:
                   class_path = os.path.join(src_dir, package_path, f"{simple_name}.java")
                   if os.path.exists(class_path):
-                      with open(class_path, 'r') as f:
-                          return f.read()
-                  
-                  # Try to find by just the simple name as fallback
-                  result = subprocess.run(['find', src_dir, '-name', f"{simple_name}.java"], 
-                                         capture_output=True, text=True)
-                  if result.stdout:
-                      filepath = result.stdout.strip().split('\n')[0]
-                      with open(filepath, 'r') as f:
-                          return f.read()
-                  
-                  print(f"Could not find source file for {class_name}")
-                  return None
+                      return class_path
+              
+              # If not found, try to find by simple name
+              for src_dir in src_dirs:
+                  try:
+                      # Use find command to locate the file
+                      result = subprocess.run(['find', src_dir, '-name', f"{simple_name}.java"], 
+                                             capture_output=True, text=True)
+                      if result.stdout:
+                          files = result.stdout.strip().split('\n')
+                          # Filter by package if possible
+                          for file in files:
+                              if package_path in file:
+                                  return file
+                          # If no exact match, return the first one
+                          return files[0]
+                  except Exception as e:
+                      print(f"Error finding source file with find command: {e}")
+              
+              # If still not found, try the src/main/java and src directories
+              if 'src/main/java' not in src_dirs:
+                  result = find_source_file(class_name, src_dirs + ['src/main/java', 'src'])
+                  if result:
+                      return result
+              
+              print(f"Could not find source file for {class_name}")
+              return None
+          
+          def get_class_source(file_path: str) -> str:
+              """Read the source code from a file."""
+              try:
+                  with open(file_path, 'r') as f:
+                      return f.read()
               except Exception as e:
-                  print(f"Error reading source for {class_name}: {e}")
+                  print(f"Error reading source file: {e}")
                   return None
           
           def check_test_exists(class_name: str, test_dir: str) -> bool:
@@ -421,25 +395,31 @@ jobs:
               """Main function to generate tests."""
               args = parse_args()
               
-              # Initialize SonarQube client
-              sonar_client = SonarQubeClient(project_key=args.project_key)
-              
-              # Get coverage data
-              coverage_data = sonar_client.get_coverage_data()
-              
-              if not coverage_data:
-                  print("No coverage gaps found in SonarQube!")
+              # Find coverage gaps
+              coverage_gaps = find_coverage_gaps(args.jacoco_report, args.min_coverage)
+              if not coverage_gaps:
+                  print("No coverage gaps found!")
                   return
               
-              print(f"Found {len(coverage_data)} classes with low coverage")
+              print(f"Found {len(coverage_gaps)} classes with low coverage")
               
               # Initialize the SambaNova API helper
               sambanova = SambaNovaCoder()
               
+              # Look in multiple source directories
+              src_dirs = [args.src_dir]
+              if 'dropwizard-jakarta-xml-ws' in os.getcwd():
+                  # We're in the main project directory
+                  src_dirs = [
+                      'dropwizard-jakarta-xml-ws/src/main/java',
+                      'dropwizard-jakarta-xml-ws-example/src/main/java',
+                      'src/main/java'
+                  ]
+              
               # Process classes with the most coverage gaps, up to max_classes
               processed_count = 0
-              for class_data in coverage_data[:args.max_classes]:
-                  class_name = class_data["class"]
+              for class_data in coverage_gaps[:args.max_classes]:
+                  class_name = class_data['class']
                   
                   # Skip classes that already have tests
                   simple_class_name = class_name.split('.')[-1]
@@ -448,19 +428,30 @@ jobs:
                       print(f"Skipping {class_name} as it already has tests")
                       continue
                   
-                  print(f"\nProcessing {class_name} with {len(class_data['methods'])} methods")
+                  print(f"\nProcessing {class_name} with {len(class_data['methods'])} methods to test")
+                  print(f"Class coverage: {class_data['class_coverage']:.1f}%")
                   
                   # Get class source
-                  class_source = get_class_source(class_name, args.src_dir)
+                  source_file = find_source_file(class_name, src_dirs)
+                  if not source_file:
+                      print(f"Could not find source file for {class_name}, skipping")
+                      continue
+                  
+                  class_source = get_class_source(source_file)
                   if not class_source:
-                      print(f"Could not get source for {class_name}, skipping")
+                      print(f"Could not read source for {class_name}, skipping")
                       continue
                   
                   # Generate tests
                   print(f"Generating tests for {class_name}...")
                   try:
+                      # Print methods to test
+                      print("Methods to test:")
+                      for method in class_data['methods']:
+                          print(f"  - {method['method']} (coverage: {method['coverage_percentage']:.1f}%)")
+                      
                       test_code = sambanova.generate_complete_test_class(
-                          class_source, class_name, class_data["methods"]
+                          class_source, class_name, class_data['methods']
                       )
                       
                       if not test_code:
@@ -477,6 +468,8 @@ jobs:
                       
                   except Exception as e:
                       print(f"Error generating tests for {class_name}: {e}")
+                      import traceback
+                      traceback.print_exc()
                       continue
               
               print(f"\nGenerated tests for {processed_count} classes")
@@ -485,24 +478,15 @@ jobs:
               main()
           EOF
 
-      - name: Install dependencies
-        run: |
-          python -m pip install --upgrade pip
-          pip install requests
+      - name: Run tests and generate coverage report
+        run: mvn clean verify jacoco:report
 
-      - name: Run SonarQube analysis
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          SONAR_TOKEN: ${{ secrets.SONAR_TOKEN }}
-        run: mvn -B -V -Dsonar.coverage.jacoco.xmlReportPaths=target/site/jacoco/jacoco.xml org.jacoco:jacoco-maven-plugin:prepare-agent verify org.jacoco:jacoco-maven-plugin:report org.sonarsource.scanner.maven:sonar-maven-plugin:sonar
-
-      - name: Generate tests with SonarQube data
+      - name: Generate tests with JaCoCo report
         env:
           SAMBANOVA_API_KEY: ${{ secrets.SAMBANOVA_API_KEY }}
-          SONAR_TOKEN: ${{ secrets.SONAR_TOKEN }}
         run: |
           cd .github/scripts
-          python sonarqube_test_generator.py --max-classes ${{ github.event.inputs.max_classes || 5 }}
+          python jacoco_test_generator.py --max-classes ${{ github.event.inputs.max_classes || 5 }} --min-coverage ${{ github.event.inputs.min_coverage || 80 }}
 
       - name: Run tests with new test classes
         run: mvn test
@@ -514,11 +498,11 @@ jobs:
           commit-message: "test: Add AI-generated tests to improve coverage"
           title: "test: Add AI-generated tests to improve coverage"
           body: |
-            This PR adds automatically generated tests to improve code coverage based on SonarQube analysis.
+            This PR adds automatically generated tests to improve code coverage based on JaCoCo analysis.
             
             ### Generated Tests
             
-            The tests were generated using Qwen2.5-Coder model with SonarQube data to target classes with low test coverage.
+            The tests were generated using Qwen2.5-Coder model with JaCoCo data to target classes with low test coverage.
             
             ### Please review
             
