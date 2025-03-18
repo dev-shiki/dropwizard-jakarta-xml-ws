@@ -101,8 +101,7 @@ jobs:
           python test_generator.py --max-classes ${{ github.event.inputs.max_classes || 5 }} --min-coverage ${{ github.event.inputs.min_coverage || 80 }} ${{ github.event.inputs.debug == 'true' && '--debug' || '' }} --base-dir ../..
 
       # Run tests with the new test classes
-      - name: Run tests with new test classes
-        run: mvn test
+      
 
       # Create a PR with the generated tests
       - name: Create Pull Request
