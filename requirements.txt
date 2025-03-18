@@ -1,0 +1,3 @@
+requests>=2.31.0
+langchain>=0.0.292
+pydantic>=2.5.2
