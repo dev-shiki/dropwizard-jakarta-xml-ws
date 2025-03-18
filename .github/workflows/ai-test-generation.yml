@@ -769,12 +769,7 @@ jobs:
 
       - name: Run tests and generate coverage report
         run: mvn clean jacoco:prepare-agent test jacoco:report
-             echo "Checking for jacoco.exec files..."
-             find . -name "jacoco.exec" -type f
-            
-             echo "Checking for jacoco.xml files..."
-             find . -name "jacoco.xml" -type f
-
+             
       - name: Run JaCoCo Finder to debug
         run: |
           cd .github/scripts
