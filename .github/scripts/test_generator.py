@@ -35,6 +35,8 @@ def parse_args():
                         help='Minimum coverage percentage threshold (default: 80.0)')
     parser.add_argument('--debug', action='store_true',
                         help='Enable debug output')
+    parser.add_argument('--base-dir', type=str, default='../..',
+                        help='Base directory (project root)')
     return parser.parse_args()
 
 def debug_print(message, debug_enabled=False):
@@ -66,23 +68,6 @@ def find_jacoco_reports(base_dir='.', debug=False):
                 found_reports.append(str(report))
                 print(f"  - {report}")
     
-    # If no reports found, search for all XML files and check if they're JaCoCo reports
-    if not found_reports and debug:
-        print("No reports found in common locations. Searching for all XML files...")
-        xml_files = list(Path(base_dir).glob("**/*.xml"))
-        
-        for xml_file in xml_files:
-            try:
-                tree = ET.parse(str(xml_file))
-                root = tree.getroot()
-                # Check if it's a JaCoCo report by looking for the report element
-                if root.tag == 'report' and 'name' in root.attrib:
-                    found_reports.append(str(xml_file))
-                    print(f"Found JaCoCo report: {xml_file}")
-            except Exception:
-                # Not a valid XML or not a JaCoCo report
-                pass
-    
     # Check if the report is valid
     valid_reports = []
     for report in found_reports:
@@ -102,7 +87,13 @@ def find_jacoco_reports(base_dir='.', debug=False):
         except Exception as e:
             print(f"Error validating report {report}: {e}")
     
-    return valid_reports
+    # Remove duplicates while preserving order
+    unique_reports = []
+    for report in valid_reports:
+        if report not in unique_reports:
+            unique_reports.append(report)
+    
+    return unique_reports
 
 def detect_project_structure(base_dir='.', debug=False):
     """Detect the project structure to find source and test directories."""
@@ -415,25 +406,20 @@ def main():
     """Main function to generate tests."""
     args = parse_args()
     
+    # Get absolute path to base directory
+    base_dir = os.path.abspath(args.base_dir)
+    
     # Find JaCoCo reports
     jacoco_reports = []
     if args.jacoco_report:
-        if os.path.exists(args.jacoco_report):
-            jacoco_reports = [args.jacoco_report]
+        report_path = os.path.join(base_dir, args.jacoco_report) if not os.path.isabs(args.jacoco_report) else args.jacoco_report
+        if os.path.exists(report_path):
+            jacoco_reports = [report_path]
         else:
-            print(f"Specified JaCoCo report not found: {args.jacoco_report}")
+            print(f"Specified JaCoCo report not found: {report_path}")
     
     if not jacoco_reports:
-        jacoco_reports = find_jacoco_reports(debug=args.debug)
-    
-    if not jacoco_reports:
-        # Generate JaCoCo report
-        print("No JaCoCo reports found. Generating one...")
-        try:
-            subprocess.run(['mvn', 'clean', 'verify', 'jacoco:report'], check=True)
-            jacoco_reports = find_jacoco_reports(debug=args.debug)
-        except Exception as e:
-            print(f"Error generating JaCoCo report: {e}")
+        jacoco_reports = find_jacoco_reports(base_dir, debug=args.debug)
     
     if not jacoco_reports:
         print("No JaCoCo reports found. Cannot continue.")
@@ -444,7 +430,7 @@ def main():
     print(f"Using JaCoCo report: {jacoco_report}")
     
     # Detect project structure
-    modules = detect_project_structure(debug=args.debug)
+    modules = detect_project_structure(base_dir, debug=args.debug)
     
     # Find coverage gaps
     coverage_gaps = find_coverage_gaps(jacoco_report, args.min_coverage, args.debug)
