@@ -94,7 +94,7 @@
         <dependency>
             <groupId>jakarta.xml.ws</groupId>
             <artifactId>jakarta.xml.ws-api</artifactId>
-            <version>${jakarta.xml.ws-api.version}</version>
+            <version>3.0.1</version>
             <scope>test</scope>
         </dependency>
 
