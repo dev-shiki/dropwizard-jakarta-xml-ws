@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
 """
-Professional Test Generator for Jakarta XML-WS Projects
+AI-Powered Test Generator for Jakarta XML-WS Projects
 
 This script analyzes JaCoCo coverage reports to identify classes with low coverage
-and generates professional-quality JUnit 5 tests for them.
+and uses SambaNova API to generate professional-quality JUnit 5 tests.
 """
 
 import os
@@ -12,12 +12,14 @@ import argparse
 import xml.etree.ElementTree as ET
 import subprocess
 import re
-import inspect
+import json
+import datetime
+import requests
 from pathlib import Path
 
 def parse_args():
     """Parse command line arguments."""
-    parser = argparse.ArgumentParser(description='Generate professional JUnit 5 tests to improve code coverage')
+    parser = argparse.ArgumentParser(description='Generate AI-powered JUnit 5 tests to improve code coverage')
     parser.add_argument('--max-classes', type=int, default=5,
                         help='Maximum number of classes to generate tests for')
     parser.add_argument('--jacoco-report', type=str, default=None,
@@ -32,7 +34,12 @@ def parse_args():
                         help='Output directory for test summary (default: <base-dir>/test-results)')
     return parser.parse_args()
 
-def find_jacoco_reports(base_dir='.'):
+def debug_print(message, debug_enabled=False):
+    """Print debug messages if debug is enabled."""
+    if debug_enabled:
+        print(f"DEBUG: {message}")
+
+def find_jacoco_reports(base_dir='.', debug=False):
     """Find all JaCoCo XML reports recursively."""
     print(f"Searching for JaCoCo reports in {os.path.abspath(base_dir)}")
     
@@ -47,21 +54,25 @@ def find_jacoco_reports(base_dir='.'):
     # Search for reports using common patterns
     for pattern in common_patterns:
         cmd = f"find {base_dir} -path '{pattern}'"
+        debug_print(f"Running command: {cmd}", debug)
         try:
             result = subprocess.run(cmd, shell=True, capture_output=True, text=True)
             if result.stdout.strip():
                 reports = result.stdout.strip().split('\n')
+                debug_print(f"Found reports: {reports}", debug)
                 found_reports.extend(reports)
         except Exception as e:
             print(f"Error searching for pattern {pattern}: {e}")
     
     # Remove duplicates and check if reports are valid
     valid_reports = []
+    seen_paths = set()
     
     for report_path in found_reports:
-        if not report_path:
+        if not report_path or report_path in seen_paths:
             continue
             
+        seen_paths.add(report_path)
         try:
             tree = ET.parse(report_path)
             root = tree.getroot()
@@ -73,12 +84,14 @@ def find_jacoco_reports(base_dir='.'):
                 classes = root.findall(".//class")
                 methods = root.findall(".//method")
                 print(f"  - Contains: {len(packages)} packages, {len(classes)} classes, {len(methods)} methods")
+            else:
+                debug_print(f"Invalid JaCoCo report structure: {report_path}", debug)
         except Exception as e:
-            print(f"Error validating report {report_path}: {e}")
+            debug_print(f"Error validating report {report_path}: {e}", debug)
     
     return valid_reports
 
-def detect_project_structure(base_dir='.'):
+def detect_project_structure(base_dir='.', debug=False):
     """Detect the project structure to find source and test directories."""
     print("Detecting project structure...")
     
@@ -115,8 +128,9 @@ def detect_project_structure(base_dir='.'):
                         'src_dir': src_main_java,
                         'test_dir': src_test_java if os.path.exists(src_test_java) else None
                     })
+                    debug_print(f"Found Maven module: {artifact_id} at {module_dir}", debug)
         except Exception as e:
-            print(f"Error processing POM file {pom_file}: {e}")
+            debug_print(f"Error processing POM file {pom_file}: {e}", debug)
     
     print(f"Found {len(modules)} Maven modules")
     for module in modules:
@@ -131,7 +145,7 @@ def detect_project_structure(base_dir='.'):
     
     return modules
 
-def find_coverage_gaps(jacoco_path, min_coverage=80.0):
+def find_coverage_gaps(jacoco_path, min_coverage=80.0, debug=False):
     """Find methods with low coverage from JaCoCo report."""
     print(f"Analyzing coverage report at {jacoco_path}")
     
@@ -142,6 +156,7 @@ def find_coverage_gaps(jacoco_path, min_coverage=80.0):
         
         for package in root.findall(".//package"):
             package_name = package.attrib.get('name', '').replace('/', '.')
+            debug_print(f"Processing package: {package_name}", debug)
             
             # Skip generated classes
             if (package_name.startswith('ws.example.ws.xml.jakarta') or 
@@ -159,6 +174,8 @@ def find_coverage_gaps(jacoco_path, min_coverage=80.0):
                 # Skip test classes, generated classes, etc.
                 if ('Test' in class_name):
                     continue
+                
+                debug_print(f"Processing class: {class_name}", debug)
                 
                 # Check if class has methods with low coverage
                 class_methods = []
@@ -187,6 +204,8 @@ def find_coverage_gaps(jacoco_path, min_coverage=80.0):
                         covered = int(counter.attrib.get('covered', 0))
                         total = missed + covered
                         coverage = 0 if total == 0 else (covered / total) * 100
+                        
+                        debug_print(f"Method {method_name}: coverage={coverage:.1f}%, missed={missed}, covered={covered}", debug)
                         
                         # Method is considered covered if it has at least one instruction covered
                         if covered > 0:
@@ -230,12 +249,16 @@ def find_coverage_gaps(jacoco_path, min_coverage=80.0):
         traceback.print_exc()
         return []
 
-def find_source_file(class_name, modules):
+def find_source_file(class_name, modules, debug=False):
     """Find the source file for a class using the module structure."""
     # Extract package and class name
     parts = class_name.split('.')
     simple_name = parts[-1]
     package_path = '/'.join(parts[:-1])
+    
+    debug_print(f"Looking for source file for {class_name}", debug)
+    debug_print(f"  Package path: {package_path}", debug)
+    debug_print(f"  Simple name: {simple_name}", debug)
     
     # Try direct path first in each module's source directory
     for module in modules:
@@ -244,507 +267,234 @@ def find_source_file(class_name, modules):
             continue
             
         class_path = os.path.join(src_dir, package_path, f"{simple_name}.java")
+        debug_print(f"  Checking {class_path}", debug)
         
         if os.path.exists(class_path):
+            debug_print(f"  Found at {class_path}", debug)
             return class_path
     
     # If not found, try to find by simple name using find command
     find_cmd = f"find {' '.join([m['src_dir'] for m in modules if os.path.exists(m['src_dir'])])} -name '{simple_name}.java' 2>/dev/null"
+    debug_print(f"  Running command: {find_cmd}", debug)
     
     try:
         result = subprocess.run(find_cmd, shell=True, capture_output=True, text=True)
         if result.stdout.strip():
             files = result.stdout.strip().split('\n')
+            debug_print(f"  Found {len(files)} candidate files", debug)
             
             # Filter by package if possible
             for file in files:
                 if package_path in file:
+                    debug_print(f"  Selected {file} (package match)", debug)
                     return file
                     
             # If no exact match, return the first one
+            debug_print(f"  Selected {files[0]} (first candidate)", debug)
             return files[0]
     except Exception as e:
-        print(f"Error finding source file: {e}")
+        debug_print(f"  Error finding source file with find command: {e}", debug)
     
     print(f"Could not find source file for {class_name}")
     return None
 
-def analyze_source_file(file_path):
-    """Extract information from the source file to help with test generation."""
-    if not file_path or not os.path.exists(file_path):
-        return None
-        
+def get_class_source(file_path):
+    """Read the source code from a file."""
     try:
         with open(file_path, 'r') as f:
-            content = f.read()
-            
-        class_info = {
-            'imports': [],
-            'fields': [],
-            'constructor_params': [],
-            'annotations': [],
-            'interfaces': [],
-            'is_abstract': False
-        }
-        
-        # Extract imports
-        imports = re.findall(r'^import\s+(.*?);', content, re.MULTILINE)
-        class_info['imports'] = imports
-        
-        # Check if class is abstract
-        class_match = re.search(r'(public\s+)?abstract\s+class', content)
-        if class_match:
-            class_info['is_abstract'] = True
-            
-        # Extract interfaces
-        implements_match = re.search(r'implements\s+(.*?)(?:\{|extends)', content)
-        if implements_match:
-            interfaces = implements_match.group(1).strip().split(',')
-            class_info['interfaces'] = [i.strip() for i in interfaces]
-            
-        # Extract field declarations to determine dependencies
-        field_matches = re.findall(r'^\s*(private|protected)\s+(\w+(?:<.*?>)?)\s+(\w+)(?:\s*=\s*.*?)?;', content, re.MULTILINE)
-        for field_match in field_matches:
-            _, field_type, field_name = field_match
-            if not field_type.startswith('final') and not field_type in ['String', 'int', 'long', 'boolean', 'double', 'float']:
-                class_info['fields'].append({
-                    'name': field_name,
-                    'type': field_type
-                })
-                
-        # Extract constructor parameters
-        constructor_match = re.search(r'public\s+\w+\s*\((.*?)\)', content)
-        if constructor_match:
-            params_str = constructor_match.group(1)
-            if params_str.strip():
-                params = params_str.split(',')
-                for param in params:
-                    param = param.strip()
-                    if param:
-                        param_parts = param.split()
-                        if len(param_parts) >= 2:
-                            class_info['constructor_params'].append({
-                                'type': param_parts[0],
-                                'name': param_parts[1]
-                            })
-        
-        # Extract class-level annotations
-        annotation_matches = re.findall(r'^\s*@(\w+)(?:\(.*?\))?', content, re.MULTILINE)
-        class_info['annotations'] = annotation_matches
-        
-        return class_info
+            return f.read()
     except Exception as e:
-        print(f"Error analyzing source file {file_path}: {e}")
+        print(f"Error reading source file: {e}")
         return None
 
-def generate_professional_test(class_name, methods, source_info=None):
-    """Generate a professional JUnit 5 test class."""
+class SambaNovaCoder:
+    """Helper class for interacting with SambaNova's Qwen2.5-Coder API for test generation."""
+    
+    def __init__(self, api_key=None, model="Qwen2.5-Coder-32B-Instruct", debug=False):
+        """Initialize with API key and model name."""
+        self.api_key = api_key or os.environ.get("SAMBANOVA_API_KEY")
+        if not self.api_key:
+            raise ValueError("SAMBANOVA_API_KEY environment variable not set")
+        
+        self.base_url = "https://api.sambanova.ai/v1"
+        self.model = model
+        self.debug = debug
+        self.headers = {
+            "Authorization": f"Bearer {self.api_key}",
+            "Content-Type": "application/json"
+        }
+    
+    def generate_test_class(self, class_source, class_name, methods):
+        """Generate a complete test class for a Java class."""
+        prompt = self._create_test_class_prompt(class_source, class_name, methods)
+        debug_print(f"Using prompt:\n{prompt}", self.debug)
+        response = self._call_api(prompt)
+        test_code = self._extract_code_from_response(response)
+        return test_code
+    
+    def _call_api(self, prompt):
+        """Make a call to the SambaNova API."""
+        data = {
+            "stream": False,
+            "model": self.model,
+            "messages": [
+                {
+                    "role": "system",
+                    "content": """You are a Java testing expert specializing in creating effective JUnit 5 tests for Dropwizard and Jakarta XML Web Services applications.
+
+IMPORTANT JAKARTA XML REQUIREMENTS:
+1. Always use 'jakarta.*' packages instead of 'javax.*' packages
+   - Use 'jakarta.xml.ws' NOT 'javax.xml.ws'
+   - Use 'jakarta.servlet' NOT 'javax.servlet'
+   - Use 'jakarta.validation' NOT 'javax.validation'
+
+2. The project uses:
+   - Dropwizard 4.x
+   - JUnit Jupiter (JUnit 5)
+   - Mockito for mocking
+   - AssertJ for assertions (import static org.assertj.core.api.Assertions.*)
+
+3. Test structure:
+   - Use @ExtendWith(MockitoExtension.class)
+   - Use @Mock for dependencies
+   - Use @BeforeEach for setup
+   - Structure tests with Given/When/Then comments
+   - Create descriptive method names (should_X_when_Y pattern)
+   - Test both happy paths and edge cases
+
+Generate complete, professional tests that thoroughly validate the functionality while following best practices."""
+                },
+                {
+                    "role": "user",
+                    "content": prompt
+                }
+            ],
+            "temperature": 0.2,
+            "top_p": 0.1
+        }
+        
+        try:
+            debug_print(f"Calling SambaNova API with model: {self.model}", self.debug)
+            response = requests.post(
+                f"{self.base_url}/chat/completions", 
+                headers=self.headers,
+                json=data
+            )
+            response.raise_for_status()
+            result = response.json()
+            if "choices" in result and result["choices"]:
+                return result["choices"][0]["message"]["content"]
+            else:
+                raise ValueError(f"Unexpected response format: {result}")
+        except requests.RequestException as e:
+            print(f"API request failed: {e}")
+            if hasattr(e, 'response') and e.response:
+                print(f"Response: {e.response.text}")
+            raise
+    
+    def _create_test_class_prompt(self, class_source, class_name, methods):
+        """Create a prompt for generating a complete test class."""
+        methods_str = "\n".join([f"- {m['method']} (current coverage: {m['coverage_percentage']:.1f}%)" for m in methods])
+        parts = class_name.split('.')
+        package_name = '.'.join(parts[:-1])
+        simple_name = parts[-1]
+        
+        return f"""Generate a complete, professional JUnit 5 test class for testing {class_name}. Here's the source code:
+
+```java
+{class_source}
+```
+
+Focus on testing these methods with low coverage:
+{methods_str}
+
+Requirements:
+1. The test class should be in package: {package_name}
+2. The test class name should be: {simple_name}Test
+3. Use proper imports (jakarta.* not javax.*)
+4. Use @ExtendWith(MockitoExtension.class) for JUnit 5 
+5. Use @Mock for dependencies and proper setup in @BeforeEach
+6. Create descriptive test methods (should_X_when_Y pattern)
+7. Include both happy path and error/edge case tests for each method
+8. Use AssertJ assertions (assertThat().isEqualTo() style)
+9. Structure with Given/When/Then comments
+10. Be thorough and professional
+11. Handle any Jakarta XML Web Services specifics appropriately
+
+Return the COMPLETE test class including package declaration and all imports.
+"""
+    
+    def _extract_code_from_response(self, response):
+        """Extract code blocks from the API response."""
+        import re
+        
+        # Try to find Java code blocks
+        java_blocks = re.findall(r'```java\n([\s\S]*?)\n```', response)
+        if java_blocks:
+            return java_blocks[0]
+        
+        # If no code blocks with "java" tag, try without language specification
+        code_blocks = re.findall(r'```\n([\s\S]*?)\n```', response)
+        if code_blocks:
+            return code_blocks[0]
+        
+        # If still no code blocks, return the whole response
+        return response
+
+def generate_fallback_test(class_name, methods):
+    """Generate a fallback test class if AI generation fails."""
     parts = class_name.split('.')
     package_name = '.'.join(parts[:-1])
     simple_name = parts[-1]
     
-    # Determine dependencies to mock based on source analysis
-    mocks = []
-    setup_code = []
-    
-    if source_info:
-        for field in source_info.get('fields', []):
-            if 'DAO' in field['type'] or 'Repository' in field['type'] or 'Service' in field['type']:
-                mocks.append(field)
-                
-        # Handle interfaces
-        implements_web_service = any('Service' in intf for intf in source_info.get('interfaces', []))
-        
-    # Imports
-    imports = [
-        f"package {package_name};",
-        "",
-        "import static org.assertj.core.api.Assertions.assertThat;",
-        "import static org.assertj.core.api.Assertions.assertThatThrownBy;",
-        "import static org.mockito.Mockito.*;",
-        "",
-        "import org.junit.jupiter.api.BeforeEach;",
-        "import org.junit.jupiter.api.Test;",
-        "import org.junit.jupiter.api.extension.ExtendWith;",
-        "import org.mockito.Mock;",
-        "import org.mockito.junit.jupiter.MockitoExtension;",
-        "import org.mockito.ArgumentCaptor;"
-    ]
-    
-    # Add Jakarta-specific imports if needed
-    if 'xml.ws' in class_name:
-        imports.extend([
-            "import jakarta.xml.ws.WebServiceContext;",
-            "import jakarta.xml.ws.handler.MessageContext;"
-        ])
-        
-    # Add DAO imports
-    if 'DAO' in simple_name or 'Repository' in simple_name:
-        imports.extend([
-            "import java.util.List;",
-            "import java.util.Optional;",
-            "import org.hibernate.Session;",
-            "import org.hibernate.SessionFactory;",
-            "import org.hibernate.Transaction;"
-        ])
-        
-    imports.append("")
-    
-    # Class declaration
-    test_class = f"""/**
- * Professional JUnit 5 tests for {simple_name}
+    template = f"""package {package_name};
+
+import static org.assertj.core.api.Assertions.assertThat;
+import static org.assertj.core.api.Assertions.assertThatThrownBy;
+import static org.mockito.Mockito.*;
+
+import org.junit.jupiter.api.BeforeEach;
+import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.extension.ExtendWith;
+import org.mockito.Mock;
+import org.mockito.junit.jupiter.MockitoExtension;
+
+/**
+ * Tests for {simple_name}
  * 
- * Tests focus on both happy path and edge cases.
+ * This is a fallback template - AI generation was not successful.
  */
 @ExtendWith(MockitoExtension.class)
 class {simple_name}Test {{
+
+    private {simple_name} classUnderTest;
+    
+    @BeforeEach
+    void setUp() {{
+        classUnderTest = new {simple_name}();
+    }}
+    
 """
     
-    # Mocks section
-    if 'xml.ws' in class_name:
-        mocks.append({'name': 'wsContext', 'type': 'WebServiceContext'})
-        
-    if 'DAO' in simple_name or 'Repository' in simple_name:
-        mocks.append({'name': 'sessionFactory', 'type': 'SessionFactory'})
-        mocks.append({'name': 'session', 'type': 'Session'})
-        mocks.append({'name': 'transaction', 'type': 'Transaction'})
-        
-    for mock in mocks:
-        test_class += f"    @Mock\n    private {mock['type']} {mock['name']};\n"
-        
-    test_class += "\n"
-    
-    # Class under test
-    test_class += f"    private {simple_name} classUnderTest;\n\n"
-    
-    # Setup method
-    test_class += "    @BeforeEach\n    void setUp() {\n"
-    
-    setup_args = []
-    
-    # For DAO classes
-    if 'DAO' in simple_name or 'Repository' in simple_name:
-        setup_code.extend([
-            "when(sessionFactory.openSession()).thenReturn(session);",
-            "when(session.getTransaction()).thenReturn(transaction);"
-        ])
-        setup_args.append("sessionFactory")
-        
-    # For web service implementations
-    elif 'xml.ws' in class_name:
-        setup_code.append("when(wsContext.getMessageContext()).thenReturn(mock(MessageContext.class));")
-        
-    # Add setup code
-    for code in setup_code:
-        test_class += f"        {code}\n"
-        
-    # Initialize class under test
-    if setup_args:
-        test_class += f"        classUnderTest = new {simple_name}({', '.join(setup_args)});\n"
-    else:
-        test_class += f"        classUnderTest = new {simple_name}();\n"
-        
-    test_class += "    }\n\n"
-    
-    # Test methods
+    # Add test methods
     for method in methods:
         method_name = method['method']
-        
-        # Generate professional test methods based on method type
-        
-        # DAO methods
-        if 'DAO' in simple_name or 'Repository' in simple_name:
-            if method_name == 'findById':
-                test_class += generate_dao_findbyid_test(simple_name, method)
-            elif method_name == 'findAll':
-                test_class += generate_dao_findall_test(simple_name, method)
-            elif method_name == 'create' or method_name == 'save':
-                test_class += generate_dao_create_test(simple_name, method)
-            else:
-                test_class += generate_generic_test(simple_name, method)
-                
-        # Web service methods
-        elif 'xml.ws' in class_name:
-            if method_name == 'echo':
-                test_class += generate_echo_test(simple_name, method)
-            elif 'Async' in method_name:
-                test_class += generate_async_test(simple_name, method)
-            else:
-                test_class += generate_web_service_test(simple_name, method)
-                
-        # Authentication methods
-        elif 'Authenticator' in simple_name:
-            test_class += generate_authenticator_test(simple_name, method)
-            
-        # Generic methods
-        else:
-            test_class += generate_generic_test(simple_name, method)
-    
-    # Close class
-    test_class += "}\n"
-    
-    # Combine imports and class
-    full_test = "\n".join(imports) + "\n\n" + test_class
-    
-    return full_test
-
-def generate_dao_findbyid_test(class_name, method):
-    """Generate tests for DAO findById method."""
-    return f"""    @Test
-    void should_find_by_id_when_record_exists() {{
-        // Given
-        Long id = 1L;
-        var expectedEntity = mock(Object.class);
-        when(session.get(any(), eq(id))).thenReturn(expectedEntity);
-        
-        // When
-        var result = classUnderTest.findById(id);
-        
-        // Then
-        assertThat(result).isPresent();
-        assertThat(result.get()).isSameAs(expectedEntity);
-        verify(session).get(any(), eq(id));
-    }}
-    
+        template += f"""
     @Test
-    void should_return_empty_optional_when_record_not_found() {{
+    void should_{method_name}_successfully() {{
         // Given
-        Long id = 999L;
-        when(session.get(any(), eq(id))).thenReturn(null);
         
         // When
-        var result = classUnderTest.findById(id);
         
         // Then
-        assertThat(result).isEmpty();
-        verify(session).get(any(), eq(id));
+        
     }}
-
 """
-
-def generate_dao_findall_test(class_name, method):
-    """Generate tests for DAO findAll method."""
-    return f"""    @Test
-    void should_find_all_records() {{
-        // Given
-        var mockQuery = mock(org.hibernate.query.Query.class);
-        var expectedResults = List.of(mock(Object.class), mock(Object.class));
-        
-        when(session.createNamedQuery(anyString())).thenReturn(mockQuery);
-        when(mockQuery.list()).thenReturn(expectedResults);
-        
-        // When
-        var result = classUnderTest.findAll();
-        
-        // Then
-        assertThat(result).hasSize(2);
-        assertThat(result).isSameAs(expectedResults);
-        verify(session).createNamedQuery(anyString());
-        verify(mockQuery).list();
-    }}
     
-    @Test
-    void should_return_empty_list_when_no_records_exist() {{
-        // Given
-        var mockQuery = mock(org.hibernate.query.Query.class);
-        var emptyList = List.of();
-        
-        when(session.createNamedQuery(anyString())).thenReturn(mockQuery);
-        when(mockQuery.list()).thenReturn(emptyList);
-        
-        // When
-        var result = classUnderTest.findAll();
-        
-        // Then
-        assertThat(result).isEmpty();
-        verify(session).createNamedQuery(anyString());
-        verify(mockQuery).list();
-    }}
+    template += "}\n"
+    return template
 
-"""
-
-def generate_dao_create_test(class_name, method):
-    """Generate tests for DAO create/save method."""
-    return f"""    @Test
-    void should_create_entity_successfully() {{
-        // Given
-        var entity = mock(Object.class);
-        when(session.persist(any())).thenReturn(entity);
-        
-        // When
-        var result = classUnderTest.create(entity);
-        
-        // Then
-        assertThat(result).isSameAs(entity);
-        verify(session).persist(entity);
-        verify(transaction, never()).rollback();
-    }}
-    
-    @Test
-    void should_handle_exception_during_create() {{
-        // Given
-        var entity = mock(Object.class);
-        when(session.persist(any())).thenThrow(new RuntimeException("Database error"));
-        
-        // When/Then
-        assertThatThrownBy(() -> classUnderTest.create(entity))
-            .isInstanceOf(RuntimeException.class)
-            .hasMessageContaining("Database error");
-            
-        verify(session).persist(entity);
-    }}
-
-"""
-
-def generate_echo_test(class_name, method):
-    """Generate tests for echo method in web services."""
-    return f"""    @Test
-    void should_echo_valid_input() {{
-        // Given
-        String input = "Hello, World!";
-        
-        // When
-        var result = classUnderTest.echo(input);
-        
-        // Then
-        assertThat(result).contains(input);
-    }}
-    
-    @Test
-    void should_reject_invalid_input() {{
-        // Given
-        String input = null;
-        
-        // When/Then
-        assertThatThrownBy(() -> classUnderTest.echo(input))
-            .isInstanceOf(Exception.class);
-    }}
-    
-    @Test
-    void should_reject_empty_input() {{
-        // Given
-        String input = "";
-        
-        // When/Then
-        assertThatThrownBy(() -> classUnderTest.echo(input))
-            .isInstanceOf(Exception.class);
-    }}
-
-"""
-
-def generate_async_test(class_name, method):
-    """Generate tests for async methods in web services."""
-    return f"""    @Test
-    void should_process_{method['method']}_asynchronously() {{
-        // Given
-        var input = mock(Object.class);
-        var asyncHandler = mock(jakarta.xml.ws.AsyncHandler.class);
-        
-        // When
-        var future = classUnderTest.{method['method']}(input, asyncHandler);
-        
-        // Then
-        assertThat(future).isNotNull();
-        // Note: Complete testing would require waiting for the async operation
-        // This is a basic structural test
-    }}
-
-"""
-
-def generate_web_service_test(class_name, method):
-    """Generate tests for web service methods."""
-    return f"""    @Test
-    void should_process_{method['method']}_successfully() {{
-        // Given
-        var input = mock(Object.class);
-        
-        // When
-        var result = classUnderTest.{method['method']}(input);
-        
-        // Then
-        assertThat(result).isNotNull();
-    }}
-    
-    @Test
-    void should_handle_errors_in_{method['method']}() {{
-        // Given
-        var input = null;
-        
-        // When/Then
-        assertThatThrownBy(() -> classUnderTest.{method['method']}(input))
-            .isInstanceOf(Exception.class);
-    }}
-
-"""
-
-def generate_authenticator_test(class_name, method):
-    """Generate tests for authenticator methods."""
-    return f"""    @Test
-    void should_authenticate_with_valid_credentials() {{
-        // Given
-        var credentials = new io.dropwizard.auth.basic.BasicCredentials("username", "secret");
-        
-        // When
-        var result = classUnderTest.authenticate(credentials);
-        
-        // Then
-        assertThat(result).isPresent();
-        assertThat(result.get().getName()).isEqualTo("username");
-    }}
-    
-    @Test
-    void should_reject_invalid_credentials() {{
-        // Given
-        var credentials = new io.dropwizard.auth.basic.BasicCredentials("username", "wrong-password");
-        
-        // When
-        var result = classUnderTest.authenticate(credentials);
-        
-        // Then
-        assertThat(result).isEmpty();
-    }}
-    
-    @Test
-    void should_handle_null_credentials() {{
-        // Given
-        var credentials = null;
-        
-        // When/Then
-        assertThatThrownBy(() -> classUnderTest.authenticate(credentials))
-            .isInstanceOf(NullPointerException.class);
-    }}
-
-"""
-
-def generate_generic_test(class_name, method):
-    """Generate tests for generic methods."""
-    return f"""    @Test
-    void should_{method['method']}_successfully() {{
-        // Given
-        // TODO: Set up test inputs and mocks
-        
-        // When
-        // TODO: Call the method
-        
-        // Then
-        // TODO: Assert expected outcomes
-    }}
-    
-    @Test
-    void should_handle_edge_cases_in_{method['method']}() {{
-        // Given
-        // TODO: Set up edge case inputs
-        
-        // When
-        // TODO: Call the method with edge case inputs
-        
-        // Then
-        // TODO: Assert expected behavior for edge cases
-    }}
-
-"""
-
-def write_test_class(class_name, test_code, modules):
+def write_test_class(class_name, test_code, modules, debug=False):
     """Write the test class to a file in the appropriate module."""
     parts = class_name.split('.')
     package_name = '.'.join(parts[:-1])
@@ -752,7 +502,7 @@ def write_test_class(class_name, test_code, modules):
     
     # Find the right module - prefer the module that contains the source class
     target_module = None
-    source_file = find_source_file(class_name, modules)
+    source_file = find_source_file(class_name, modules, debug)
     
     if source_file:
         for module in modules:
@@ -781,7 +531,7 @@ def write_test_class(class_name, test_code, modules):
     with open(test_file, 'w') as f:
         f.write(test_code)
     
-    print(f"✅ Wrote professional test class to {os.path.abspath(test_file)}")
+    print(f"✅ Wrote AI-generated test class to {os.path.abspath(test_file)}")
     return os.path.abspath(test_file)
 
 def create_html_report(generated_tests, output_dir):
@@ -798,7 +548,7 @@ def create_html_report(generated_tests, output_dir):
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Test Generation Report</title>
+    <title>AI Test Generation Report</title>
     <style>
         body {{
             font-family: Arial, sans-serif;
@@ -846,7 +596,7 @@ def create_html_report(generated_tests, output_dir):
     </style>
 </head>
 <body>
-    <h1>Professional Test Generation Report</h1>
+    <h1>AI-Powered Test Generation Report</h1>
     
     <div class="summary">
         <h2>Summary</h2>
@@ -896,8 +646,17 @@ def main():
     # Get absolute path to base directory
     base_dir = os.path.abspath(args.base_dir)
     
+    # Initialize SambaNova API client
+    try:
+        sambanova_client = SambaNovaCoder(debug=args.debug)
+        print("✅ Connected to SambaNova API for AI-powered test generation")
+    except Exception as e:
+        print(f"⚠️ Could not initialize SambaNova API client: {e}")
+        print("⚠️ Will use fallback test templates")
+        sambanova_client = None
+    
     # Find JaCoCo reports
-    jacoco_reports = find_jacoco_reports(base_dir)
+    jacoco_reports = find_jacoco_reports(base_dir, args.debug)
     
     if not jacoco_reports:
         print("❌ No JaCoCo reports found. Cannot continue.")
@@ -908,10 +667,10 @@ def main():
     print(f"Using JaCoCo report: {jacoco_report}")
     
     # Detect project structure
-    modules = detect_project_structure(base_dir)
+    modules = detect_project_structure(base_dir, args.debug)
     
     # Find coverage gaps
-    coverage_gaps = find_coverage_gaps(jacoco_report, args.min_coverage)
+    coverage_gaps = find_coverage_gaps(jacoco_report, args.min_coverage, args.debug)
     if not coverage_gaps:
         print("✅ No coverage gaps found!")
         return
@@ -928,12 +687,16 @@ def main():
         print(f"\nProcessing {class_name} with {len(class_data['methods'])} methods to test")
         print(f"Class coverage: {class_data['class_coverage']:.1f}%")
         
-        # Get source file for analysis
-        source_file = find_source_file(class_name, modules)
-        source_info = None
-        
-        if source_file:
-            source_info = analyze_source_file(source_file)
+        # Get source file
+        source_file = find_source_file(class_name, modules, args.debug)
+        if not source_file:
+            print(f"❌ Could not find source file for {class_name}, skipping")
+            continue
+            
+        class_source = get_class_source(source_file)
+        if not class_source:
+            print(f"❌ Could not read source for {class_name}, skipping")
+            continue
         
         # Generate tests
         print(f"Methods to test:")
@@ -942,11 +705,25 @@ def main():
             method_names.append(method['method'])
             print(f"  - {method['method']} (coverage: {method['coverage_percentage']:.1f}%)")
         
-        # Generate professional test code
-        test_code = generate_professional_test(class_name, class_data['methods'], source_info)
+        # Generate test code - try AI first, fallback to template
+        test_code = None
+        if sambanova_client:
+            try:
+                print(f"🤖 Generating AI-powered tests with SambaNova for {class_name}...")
+                test_code = sambanova_client.generate_test_class(class_source, class_name, class_data['methods'])
+                print(f"✅ Successfully generated AI-powered tests for {class_name}")
+            except Exception as e:
+                print(f"⚠️ AI test generation failed: {e}")
+                print(f"⚠️ Using fallback template for {class_name}")
+        
+        if not test_code:
+            test_code = generate_fallback_test(class_name, class_data['methods'])
+        
+        # Fix common issues with generated tests
+        test_code = test_code.replace('javax.', 'jakarta.')
         
         # Write test class
-        test_path = write_test_class(class_name, test_code, modules)
+        test_path = write_test_class(class_name, test_code, modules, args.debug)
         if test_path:
             processed_count += 1
             generated_tests.append({
@@ -955,7 +732,7 @@ def main():
                 'methods': method_names
             })
     
-    print(f"\n📝 Generated professional test classes for {processed_count} classes")
+    print(f"\n🎉 Generated AI-powered test classes for {processed_count} classes")
     
     # Print table of generated files
     if generated_tests:
@@ -968,7 +745,6 @@ def main():
             
     # Create HTML report if output directory is specified
     if args.output_dir:
-        import datetime
         report_path = create_html_report(generated_tests, args.output_dir)
         if report_path:
             print(f"\n📊 HTML report available at: {report_path}")
