@@ -11,14 +11,6 @@ on:
         description: 'Minimum coverage percentage threshold'
         required: true
         default: '80'
-      debug:
-        description: 'Enable debug output'
-        required: false
-        default: 'false'
-        type: boolean
-  schedule:
-    # Run weekly on Monday at 1 AM
-    - cron: '0 1 * * 1'
 
 jobs:
   generate-tests:
@@ -26,10 +18,8 @@ jobs:
     steps:
       - name: Checkout code
         uses: actions/checkout@v4
-        with:
-          fetch-depth: 0  # Fetch all history for test analysis
 
-      - name: Set up JDK
+      - name: Set up JDK 17
         uses: actions/setup-java@v4
         with:
           java-version: '17'
@@ -40,104 +30,15 @@ jobs:
         uses: actions/setup-python@v4
         with:
           python-version: '3.10'
-
-      - name: Install dependencies
-        run: |
-          python -m pip install --upgrade pip
-          pip install requests
-
-      # Build the project first to ensure all modules are compiled
-      - name: Build project
-        run: mvn clean compile -DskipTests
-
-      # We'll modify the test dependencies approach to be more compatible
-      - name: Create test dependencies file
-        run: |
-          cat > test-dependencies.xml << 'EOF'
-          <dependencies>
-            <dependency>
-              <groupId>org.junit.jupiter</groupId>
-              <artifactId>junit-jupiter</artifactId>
-              <version>5.10.2</version>
-              <scope>test</scope>
-            </dependency>
-            <dependency>
-              <groupId>org.mockito</groupId>
-              <artifactId>mockito-junit-jupiter</artifactId>
-              <version>5.10.0</version>
-              <scope>test</scope>
-            </dependency>
-            <dependency>
-              <groupId>org.assertj</groupId>
-              <artifactId>assertj-core</artifactId>
-              <version>3.25.3</version>
-              <scope>test</scope>
-            </dependency>
-          </dependencies>
-          EOF
-
-      # Add JaCoCo plugin for coverage analysis
-      - name: Add JaCoCo plugin to POM
-        run: |
-          mkdir -p .github/temp
-          cat > .github/temp/jacoco-plugin.xml << 'EOF'
-          <plugin>
-            <groupId>org.jacoco</groupId>
-            <artifactId>jacoco-maven-plugin</artifactId>
-            <version>0.8.12</version>
-            <executions>
-              <execution>
-                <id>prepare-agent</id>
-                <goals>
-                  <goal>prepare-agent</goal>
-                </goals>
-              </execution>
-              <execution>
-                <id>report</id>
-                <phase>test</phase>
-                <goals>
-                  <goal>report</goal>
-                </goals>
-              </execution>
-            </executions>
-          </plugin>
-          EOF
           
-          # Use xmlstarlet to add the plugin properly
-          sudo apt-get update && sudo apt-get install -y xmlstarlet
-          
-          # Process each module's POM
-          for POM_FILE in $(find . -name "pom.xml" | grep -v "/target/"); do
-            # Check if JaCoCo plugin is already defined
-            if ! grep -q "jacoco-maven-plugin" "$POM_FILE"; then
-              # Make a backup
-              cp "$POM_FILE" "${POM_FILE}.bak"
-              
-              # Add plugin to build/plugins section
-              if xmlstarlet sel -t -c "/project/build/plugins" "$POM_FILE" > /dev/null 2>&1; then
-                xmlstarlet ed --inplace -s "/project/build/plugins" -t elem -n "plugin-placeholder" -v "" \
-                  -i "//plugin-placeholder" -t xml -n "" -v "$(cat .github/temp/jacoco-plugin.xml)" \
-                  -r "//plugin-placeholder" -v "plugin" "$POM_FILE"
-              elif xmlstarlet sel -t -c "/project/build" "$POM_FILE" > /dev/null 2>&1; then
-                xmlstarlet ed --inplace -s "/project/build" -t elem -n "plugins" -v "" \
-                  -s "/project/build/plugins" -t elem -n "plugin-placeholder" -v "" \
-                  -i "//plugin-placeholder" -t xml -n "" -v "$(cat .github/temp/jacoco-plugin.xml)" \
-                  -r "//plugin-placeholder" -v "plugin" "$POM_FILE"
-              else
-                xmlstarlet ed --inplace -s "/project" -t elem -n "build" -v "" \
-                  -s "/project/build" -t elem -n "plugins" -v "" \
-                  -s "/project/build/plugins" -t elem -n "plugin-placeholder" -v "" \
-                  -i "//plugin-placeholder" -t xml -n "" -v "$(cat .github/temp/jacoco-plugin.xml)" \
-                  -r "//plugin-placeholder" -v "plugin" "$POM_FILE"
-              fi
-            fi
-          done
+      - name: Install Python dependencies
+        run: pip install requests
 
-      # Run tests with JaCoCo to generate coverage data
-      - name: Run tests with JaCoCo coverage
+      # Add JaCoCo to parent POM for coverage reporting
+      - name: Add JaCoCo to parent POM
         run: |
-          echo "Running tests with JaCoCo agent..."
-          mvn test jacoco:report -B -V
+          mvn org.codehaus.mojo:versions-maven-plugin:2.15.0:set-property -Dproperty=jacoco.version -DnewVersion=0.8.12 -DgenerateBackupPoms=false
+          mvn jacoco:prepare-agent test jacoco:report
 
       # Generate tests using SambaNova API
       - name: Generate tests
@@ -145,14 +46,8 @@ jobs:
           SAMBANOVA_API_KEY: ${{ secrets.SAMBANOVA_API_KEY }}
         run: |
           python .github/scripts/test_generator.py \
-            --max-classes ${{ github.event.inputs.max_classes || 5 }} \
-            --min-coverage ${{ github.event.inputs.min_coverage || 80 }} \
-            ${{ github.event.inputs.debug == 'true' && '--debug' || '' }} \
-            --base-dir .
-
-      # Build with the new test classes
-      - name: Build with new test classes
-        run: mvn test -B -V
+            --max-classes ${{ github.event.inputs.max_classes }} \
+            --min-coverage ${{ github.event.inputs.min_coverage }}
 
       # Create a PR with the generated tests
       - name: Create Pull Request
@@ -161,17 +56,5 @@ jobs:
           token: ${{ secrets.GITHUB_TOKEN }}
           commit-message: "test: Add AI-generated tests to improve coverage"
           title: "test: Add AI-generated tests to improve coverage"
-          body: |
-            This PR adds automatically generated tests to improve code coverage.
-            
-            ### Generated Tests
-            
-            The tests were generated using Qwen2.5-Coder model with JaCoCo data to target classes with low test coverage.
-            
-            ### Please review
-            
-            - [ ] The tests are well-structured and follow project conventions
-            - [ ] The tests properly test the targeted functionality
-            - [ ] The tests don't have any false assumptions about the code
           branch: ai-generated-tests
           base: main
