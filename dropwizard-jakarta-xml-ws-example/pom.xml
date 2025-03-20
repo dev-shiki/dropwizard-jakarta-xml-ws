@@ -91,7 +91,12 @@
         </dependency>
         
         <!-- Additional Jakarta dependencies needed for tests -->
-        
+        <dependency>
+            <groupId>jakarta.xml.ws</groupId>
+            <artifactId>jakarta.xml.ws-api</artifactId>
+            <version>3.0.1</version>
+            <scope>test</scope>
+        </dependency>
 
     </dependencies>
 
