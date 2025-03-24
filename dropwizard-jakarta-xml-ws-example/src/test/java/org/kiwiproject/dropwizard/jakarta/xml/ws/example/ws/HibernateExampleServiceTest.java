@@ -1,7 +1,6 @@
 package org.kiwiproject.dropwizard.jakarta.xml.ws.example.ws;
 
 import io.dropwizard.hibernate.UnitOfWork;
-import jakarta.jws.WebFault;
 import jakarta.validation.Valid;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
